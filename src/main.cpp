@@ -1,72 +1,32 @@
-/**************************************************************
- *
- * For this example, you need to install PubSubClient library:
- *   https://github.com/knolleary/pubsubclient
- *   or from http://librarymanager/all#PubSubClient
- *
- * TinyGSM Getting Started guide:
- *   https://tiny.cc/tinygsm-readme
- *
- * For more MQTT examples, see PubSubClient library
- *
- **************************************************************
- * Use Mosquitto client tools to work with MQTT
- *   Ubuntu/Linux: sudo apt-get install mosquitto-clients
- *   Windows:      https://mosquitto.org/download/
- *
- * Subscribe for messages:
- *   mosquitto_sub -h test.mosquitto.org -t GsmClientTest/init -t GsmClientTest/ledStatus -q 1
- * Toggle led:
- *   mosquitto_pub -h test.mosquitto.org -t GsmClientTest/led -q 1 -m "toggle"
- *
- * You can use Node-RED for wiring together MQTT-enabled devices
- *   https://nodered.org/
- * Also, take a look at these additional Node-RED modules:
- *   node-red-contrib-blynk-ws
- *   node-red-dashboard
- *
- **************************************************************/
-
-// Select your modem:
-// #define TINY_GSM_MODEM_SIM800
-// #define TINY_GSM_MODEM_SIM808
-// #define TINY_GSM_MODEM_SIM868
-// #define TINY_GSM_MODEM_SIM900
-// #define TINY_GSM_MODEM_SIM7000
-// #define TINY_GSM_MODEM_SIM5360
-// #define TINY_GSM_MODEM_SIM7600
-// #define TINY_GSM_MODEM_UBLOX
-// #define TINY_GSM_MODEM_SARAR4
-// #define TINY_GSM_MODEM_M95
-// #define TINY_GSM_MODEM_BG96
-// #define TINY_GSM_MODEM_A6
 #define TINY_GSM_MODEM_A7
-// #define TINY_GSM_MODEM_M590
-// #define TINY_GSM_MODEM_MC60
-// #define TINY_GSM_MODEM_MC60E
-// #define TINY_GSM_MODEM_ESP8266
-// #define TINY_GSM_MODEM_XBEE
-// #define TINY_GSM_MODEM_SEQUANS_MONARCH
 
 // Set serial for debug console (to the Serial Monitor, default speed 115200)
 #define SerialMon Serial
 
-// Set serial for AT commands (to the module)
-// Use Hardware Serial on Mega, Leonardo, Micro
-//#define SerialAT Serial1
-
-// or Software Serial on Uno, Nano
+#include <FS.h>
 #include <Arduino.h>
+#include <ESP8266WiFi.h>
+#include <DNSServer.h>
+#include <ESP8266WebServer.h>
+#include <WiFiManager.h>
+#include <ArduinoJson.h>
+#define USE_ARDUINO_INTERRUPTS true // Don't use interrupts for PulseSensor
+#include <PulseSensorPlayground.h>
 #include <SoftwareSerial.h>
-SoftwareSerial SerialAT(14, 12); // RX, TX
+SoftwareSerial SerialAT(D5, D6); // RX, TX
 
 #include <TinyGsmClient.h>
 #include <PubSubClient.h>
 
 
 
-
+boolean mqttConnect();
 void mqttCallback(char* topic, uint8_t* payload, unsigned int len);
+boolean gsmConnect();
+boolean wifiConnect(boolean loadSuccessful);
+boolean loadConfig();
+boolean saveConfig();
+void saveConfigCallback();
 
 // See all AT commands, if wanted
 // #define DUMP_AT_COMMANDS
@@ -87,6 +47,16 @@ void mqttCallback(char* topic, uint8_t* payload, unsigned int len);
 // set GSM PIN, if any
 #define GSM_PIN ""
 
+#define JSON_DOCUMENT_SIZE 1024
+
+#define AP_NAME "PetCare - AP"
+
+// Pulse sensor constants
+#define PULSE A0
+#define THRESHOLD 550
+byte samplesUntilReport;
+const byte SAMPLES_PER_SERIAL_SAMPLE = 10;
+
 // Your GPRS credentials
 // Leave empty, if missing user or pass
 const char apn[]  = "internet.comcel.com.co";
@@ -102,6 +72,11 @@ const char* topicLed = "GsmClientTest/led";
 const char* topicInit = "GsmClientTest/init";
 const char* topicLedStatus = "GsmClientTest/ledStatus";
 
+// Config parameters
+char petName[40] = "Doggo";
+char email[40] = "email@example.com";
+
+bool shouldSaveConfig = false;
 
 #ifdef DUMP_AT_COMMANDS
   #include <StreamDebugger.h>
@@ -110,11 +85,11 @@ const char* topicLedStatus = "GsmClientTest/ledStatus";
 #else
 TinyGsm modem(SerialAT);
 #endif
-TinyGsmClient client(modem);
-PubSubClient mqtt(client);
+TinyGsmClient gsmClient(modem);
+WiFiClient wifiClient;
+PubSubClient mqtt;
+PulseSensorPlayground pulseSensor;
 
-#define LED_PIN 13
-int ledStatus = LOW;
 
 long lastReconnectAttempt = 0;
 
@@ -123,18 +98,77 @@ void setup() {
   SerialMon.begin(9600);
   delay(10);
 
-  pinMode(LED_PIN, OUTPUT);
+  pulseSensor.setSerial(SerialMon);
+  pulseSensor.analogInput(PULSE);
+  pulseSensor.setThreshold(THRESHOLD);
 
-  // !!!!!!!!!!!
-  // Set your reset, enable, power pins here
-  // !!!!!!!!!!!
+  if (!pulseSensor.begin()) {
+    SerialMon.println("Pulse sensor initialization unsuccessful");
+  }
 
-  SerialMon.println("Wait...");
+  boolean loadSuccessful = loadConfig();
 
-  // Set GSM module baud rate
-  SerialAT.begin(9600);
-  delay(3000);
+  if (wifiConnect(!loadSuccessful)) {
+    mqtt.setClient(wifiClient);
+  } else {
+    if (gsmConnect()) {
+      mqtt.setClient(gsmClient);
+    }
+  }
+  
+  
+  // MQTT Broker setup
+  mqtt.setServer(broker, 1883);
+  mqtt.setCallback(mqttCallback);
+}
 
+
+void loop() {
+
+  if (!mqtt.connected()) {
+    // Reconnect every 10 seconds
+    unsigned long t = millis();
+    if (t - lastReconnectAttempt > 10000L) {
+      lastReconnectAttempt = t;
+      if (mqttConnect()) {
+        lastReconnectAttempt = 0;
+      }
+    }
+    delay(100);
+    return;
+  }
+  
+  if (pulseSensor.sawNewSample()) {
+    /*
+       Every so often, send the latest Sample.
+       We don't print every sample, because our baud rate
+       won't support that much I/O.
+    */
+    if (--samplesUntilReport == (byte) 0) {
+      samplesUntilReport = SAMPLES_PER_SERIAL_SAMPLE;
+      
+      if (pulseSensor.sawStartOfBeat()) {
+        Serial.println("♥  A HeartBeat Happened ! "); // If test is "true", print a message "a heartbeat happened".
+        Serial.print("BPM: ");                        // Print phrase "BPM: " 
+        Serial.println(pulseSensor.getBeatsPerMinute());                        // Print the value inside of myBPM. 
+      }
+    }
+  }
+
+  mqtt.loop();
+}
+
+void mqttCallback(char* topic, uint8_t* payload, unsigned int len) {
+  SerialMon.print("Message arrived [");
+  SerialMon.print(topic);
+  SerialMon.print("]: ");
+  SerialMon.write(payload, len);
+  SerialMon.println();
+
+  
+}
+
+boolean gsmConnect() {
   // Restart takes quite some time
   // To skip it, call init() instead of restart()
   SerialMon.println("Initializing modem...");
@@ -162,7 +196,7 @@ void setup() {
   if (!modem.networkConnect(wifiSSID, wifiPass)) {
     SerialMon.println(" fail");
     delay(10000);
-    return;
+    return false;
   }
   SerialMon.println(" success");
 #endif
@@ -176,7 +210,7 @@ void setup() {
   if (!modem.waitForNetwork()) {
     SerialMon.println(" fail");
     delay(10000);
-    return;
+    return false;
   }
   SerialMon.println(" success");
 
@@ -190,14 +224,50 @@ void setup() {
     if (!modem.gprsConnect(apn, gprsUser, gprsPass)) {
       SerialMon.println(" fail");
       delay(10000);
-      return;
+      return false;
     }
     SerialMon.println(" success");
 #endif
+  return true;
+}
 
-  // MQTT Broker setup
-  mqtt.setServer(broker, 1883);
-  mqtt.setCallback(mqttCallback);
+boolean wifiConnect(boolean forceConfigPortal) {
+  SerialMon.print("Connecting to Wi-Fi...");
+  WiFiManager wifiManager;
+  wifiManager.setSaveConfigCallback(saveConfigCallback);
+
+  WiFiManagerParameter customPetName("name", "Pet name", petName, 40);
+  WiFiManagerParameter customEmail("email", "e-mail", email, 40);
+
+  wifiManager.addParameter(&customPetName);
+  wifiManager.addParameter(&customEmail);
+  
+  
+  boolean connectionSuccessful = false;
+  if (forceConfigPortal) {
+    SerialMon.println("Starting forced config portal");
+    connectionSuccessful = wifiManager.startConfigPortal(AP_NAME);
+  } 
+  else connectionSuccessful = wifiManager.autoConnect(AP_NAME);
+
+  if(!connectionSuccessful) {
+    SerialMon.println(" fail");
+    return false;
+  }
+  SerialMon.println(" success");
+
+  strcpy(petName, customPetName.getValue());
+  strcpy(email, customEmail.getValue());
+  
+  SerialMon.print("petName: ");
+  SerialMon.println(petName);
+
+  SerialMon.println("Updated config parameters");
+
+  if (shouldSaveConfig) {
+    saveConfig();
+  }
+  return true;
 }
 
 boolean mqttConnect() {
@@ -215,44 +285,80 @@ boolean mqttConnect() {
     return false;
   }
   SerialMon.println(" success");
-  mqtt.publish(topicInit, "GsmClientTest started");
-  if (mqtt.subscribe(topicLed)) {
+  if (mqtt.subscribe(email)) {
     SerialMon.print("Subscribed to: ");
-    SerialMon.println(topicLed);
+    SerialMon.println(email);
   }
   return mqtt.connected();
 }
 
-void loop() {
+boolean loadConfig() {
+  if (!SPIFFS.begin()) {
+    SerialMon.println("Failed to mount file system: couldn't initialize SPIFFS");
+    return false;
+  }
+  SerialMon.println("Mounted file system");
 
-  if (!mqtt.connected()) {
-    SerialMon.println("=== MQTT NOT CONNECTED ===");
-    // Reconnect every 10 seconds
-    unsigned long t = millis();
-    if (t - lastReconnectAttempt > 10000L) {
-      lastReconnectAttempt = t;
-      if (mqttConnect()) {
-        lastReconnectAttempt = 0;
-      }
-    }
-    delay(100);
-    return;
+  if (!SPIFFS.exists("/config.json")) {
+    SerialMon.println("Failed to mount the file system: config.json doesn't exist");
+    return false;
   }
 
-  mqtt.loop();
+  // File exists reading and loading
+  SerialMon.println("Reading config file");
+  File configFile = SPIFFS.open("/config.json", "r");
+
+  if (!configFile) {
+    SerialMon.println("Failed to mount the file system: couldn't open config.json");
+    return false;
+  }
+
+  SerialMon.println("Opened config file");
+  size_t size = configFile.size();
+  
+  // Allocate buffer to store contents of the file
+  std::unique_ptr<char[]> buffer(new char[size]);
+
+  configFile.readBytes(buffer.get(), size);
+  DynamicJsonDocument jsonDocument(JSON_DOCUMENT_SIZE);
+  DeserializationError error = deserializeJson(jsonDocument, buffer.get());
+  JsonObject json = jsonDocument.as<JsonObject>();
+  serializeJsonPretty(jsonDocument, SerialMon);
+
+  if (error) {
+    Serial.println("Failed to load json config");
+    configFile.close();
+    return false;
+  }
+
+  SerialMon.println("Parsed json");
+  strcpy(petName, json["petName"]);
+  strcpy(email, json["email"]);
+  configFile.close();
+  
+  return true;
 }
 
-void mqttCallback(char* topic, uint8_t* payload, unsigned int len) {
-  SerialMon.print("Message arrived [");
-  SerialMon.print(topic);
-  SerialMon.print("]: ");
-  SerialMon.write(payload, len);
-  SerialMon.println();
+boolean saveConfig() {
+  SerialMon.println("Saving config");
+  DynamicJsonDocument jsonDocument(JSON_DOCUMENT_SIZE);
+  jsonDocument["email"] = email;
+  jsonDocument["petName"] = petName;
+  File configFile = SPIFFS.open("/config.json", "w");
 
-  // Only proceed if incoming message's topic matches
-  if (String(topic) == topicLed) {
-    ledStatus = !ledStatus;
-    digitalWrite(LED_PIN, ledStatus);
-    mqtt.publish(topicLedStatus, ledStatus ? "1" : "0");
+  if (!configFile) {
+    SerialMon.println("Failed to open config file for writing");
+    return false;
   }
+
+  serializeJsonPretty(jsonDocument, SerialMon);
+  serializeJson(jsonDocument, configFile);
+  configFile.close();
+  SerialMon.println("config saved");
+  return true; 
+}
+
+void saveConfigCallback() {
+  SerialMon.println("Should save config");
+  shouldSaveConfig = true;
 }
