@@ -10,7 +10,7 @@
 #include <ESP8266WebServer.h>
 #include <WiFiManager.h>
 #include <ArduinoJson.h>
-#define USE_ARDUINO_INTERRUPTS true // Don't use interrupts for PulseSensor
+#define USE_ARDUINO_INTERRUPTS false // Don't use interrupts for PulseSensor
 #include <PulseSensorPlayground.h>
 #include <SoftwareSerial.h>
 SoftwareSerial SerialAT(D5, D6); // RX, TX
@@ -27,6 +27,7 @@ boolean wifiConnect(boolean loadSuccessful);
 boolean loadConfig();
 boolean saveConfig();
 void saveConfigCallback();
+void changeMux(int A);
 
 // See all AT commands, if wanted
 // #define DUMP_AT_COMMANDS
@@ -51,8 +52,10 @@ void saveConfigCallback();
 
 #define AP_NAME "PetCare - AP"
 
+#define MUX_A D2
+#define ANALOG_INPUT A0
+
 // Pulse sensor constants
-#define PULSE A0
 #define THRESHOLD 550
 byte samplesUntilReport;
 const byte SAMPLES_PER_SERIAL_SAMPLE = 10;
@@ -99,9 +102,11 @@ void setup() {
   delay(10);
 
   pulseSensor.setSerial(SerialMon);
-  pulseSensor.analogInput(PULSE);
+  pulseSensor.analogInput(ANALOG_INPUT);
   pulseSensor.setThreshold(THRESHOLD);
 
+  pinMode(MUX_A, OUTPUT);
+  
   if (!pulseSensor.begin()) {
     SerialMon.println("Pulse sensor initialization unsuccessful");
   }
@@ -116,7 +121,6 @@ void setup() {
     }
   }
   
-  
   // MQTT Broker setup
   mqtt.setServer(broker, 1883);
   mqtt.setCallback(mqttCallback);
@@ -124,7 +128,7 @@ void setup() {
 
 
 void loop() {
-
+  
   if (!mqtt.connected()) {
     // Reconnect every 10 seconds
     unsigned long t = millis();
@@ -138,6 +142,8 @@ void loop() {
     return;
   }
   
+  changeMux(LOW);
+  // Serial.println(analogRead(ANALOG_INPUT));
   if (pulseSensor.sawNewSample()) {
     /*
        Every so often, send the latest Sample.
@@ -151,9 +157,14 @@ void loop() {
         Serial.println("♥  A HeartBeat Happened ! "); // If test is "true", print a message "a heartbeat happened".
         Serial.print("BPM: ");                        // Print phrase "BPM: " 
         Serial.println(pulseSensor.getBeatsPerMinute());                        // Print the value inside of myBPM. 
+        changeMux(HIGH);
+        float value = analogRead(ANALOG_INPUT);
+        SerialMon.print("Temperature: ");
+        SerialMon.println((value * 3.3 / 1024.0 - 0.5) * 100);
       }
     }
   }
+
 
   mqtt.loop();
 }
@@ -361,4 +372,8 @@ boolean saveConfig() {
 void saveConfigCallback() {
   SerialMon.println("Should save config");
   shouldSaveConfig = true;
+}
+
+void changeMux(int A) {
+  digitalWrite(MUX_A, A);
 }
