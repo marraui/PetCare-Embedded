@@ -28,6 +28,7 @@ boolean loadConfig();
 boolean saveConfig();
 void saveConfigCallback();
 void changeMux(int A);
+boolean sendMessage(float bpm, float tmp);
 
 // See all AT commands, if wanted
 // #define DUMP_AT_COMMANDS
@@ -154,13 +155,18 @@ void loop() {
       samplesUntilReport = SAMPLES_PER_SERIAL_SAMPLE;
       
       if (pulseSensor.sawStartOfBeat()) {
+        float tmp = pulseSensor.getBeatsPerMinute();
+        float bpm = (analogRead(ANALOG_INPUT) * 3.3 / 1024.0 - 0.5) * 100;
+
         Serial.println("♥  A HeartBeat Happened ! "); // If test is "true", print a message "a heartbeat happened".
         Serial.print("BPM: ");                        // Print phrase "BPM: " 
-        Serial.println(pulseSensor.getBeatsPerMinute());                        // Print the value inside of myBPM. 
+        Serial.println(bpm);                        // Print the value inside of myBPM. 
         changeMux(HIGH);
-        float value = analogRead(ANALOG_INPUT);
+
         SerialMon.print("Temperature: ");
-        SerialMon.println((value * 3.3 / 1024.0 - 0.5) * 100);
+        SerialMon.println(tmp);
+
+        sendMessage(bpm, tmp);
       }
     }
   }
@@ -239,6 +245,19 @@ boolean gsmConnect() {
     }
     SerialMon.println(" success");
 #endif
+  // SerialMon.print("Enabling GPS... ");
+  // if (!modem.enableGPS()) {
+  //   SerialMon.println("fail");
+  //   return false;
+  // }
+  // SerialMon.println("success");
+
+  // SerialMon.print("Enabling AGPS... ");
+  // if (!modem.enableAGPS()) {
+  //   SerialMon.println("fail");
+  // }
+
+  // SerialMon.println("success");
   return true;
 }
 
@@ -300,6 +319,18 @@ boolean mqttConnect() {
     SerialMon.print("Subscribed to: ");
     SerialMon.println(email);
   }
+  return mqtt.connected();
+}
+
+boolean sendMessage(float bpm, float tmp) {
+  DynamicJsonDocument jsonDocument(200);
+  jsonDocument["name"] = petName;
+  jsonDocument["typeOfPet"] = 1;
+  jsonDocument["heartRate"] = bpm;
+  jsonDocument["temperature"] = tmp;
+  char json[200];
+  serializeJson(jsonDocument, json);
+  mqtt.publish(email, json);
   return mqtt.connected();
 }
 
