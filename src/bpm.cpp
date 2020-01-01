@@ -4,7 +4,7 @@
 
 
 // const int PULSE_INPUT = A0;
-// const int THRESHOLD = 550;   // Adjust this number to avoid noise when idle
+// const int THRESHOLD = 557;   // Adjust this number to avoid noise when idle
 
 
 // byte samplesUntilReport;
@@ -26,6 +26,8 @@
 //      not work properly.
 //   */
 //   Serial.begin(9600);
+//   pinMode(D2, OUTPUT);
+//   digitalWrite(D2, 0);
 
 //   pulseSensor.setSerial(Serial);
 //   pulseSensor.setThreshold(THRESHOLD);
@@ -75,9 +77,7 @@
 //          At about the beginning of every heartbeat,
 //          report the heart rate and inter-beat-interval.
 //       */
-//       if (pulseSensor.sawStartOfBeat()) {
-//         Serial.println("♥  A HeartBeat Happened ! "); // If test is "true", print a message "a heartbeat happened".
-//         Serial.print("BPM: ");                        // Print phrase "BPM: " 
+//       if (pulseSensor.sawStartOfBeat()) {                       // Print phrase "BPM: " 
 //         Serial.println(pulseSensor.getBeatsPerMinute());                        // Print the value inside of myBPM. 
 //       }
 //     }
