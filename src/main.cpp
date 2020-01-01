@@ -14,7 +14,7 @@
 #include <PulseSensorPlayground.h>
 #include <SoftwareSerial.h>
 SoftwareSerial SerialAT(D5, D6); // RX, TX
-
+ 
 #include <TinyGsmClient.h>
 #include <PubSubClient.h>
 
@@ -155,14 +155,14 @@ void loop() {
       samplesUntilReport = SAMPLES_PER_SERIAL_SAMPLE;
       
       if (pulseSensor.sawStartOfBeat()) {
-        float tmp = pulseSensor.getBeatsPerMinute();
-        float bpm = (analogRead(ANALOG_INPUT) * 3.3 / 1024.0 - 0.5) * 100;
+        float bpm = pulseSensor.getBeatsPerMinute();
 
         Serial.println("♥  A HeartBeat Happened ! "); // If test is "true", print a message "a heartbeat happened".
         Serial.print("BPM: ");                        // Print phrase "BPM: " 
         Serial.println(bpm);                        // Print the value inside of myBPM. 
         changeMux(HIGH);
 
+        float tmp = (analogRead(ANALOG_INPUT) * 3.3 / 1024.0 - 0.5) * 100;
         SerialMon.print("Temperature: ");
         SerialMon.println(tmp);
 
