@@ -3,11 +3,13 @@
 // Set serial for debug console (to the Serial Monitor, default speed 115200)
 #define SerialMon Serial
 
+#define HOST_NAME "esp8266-01"
+
 #include <FS.h>
 #include <Arduino.h>
 #include <ESP8266WiFi.h>
 #include <DNSServer.h>
-#include <ESP8266WebServer.h>
+#include <ESP8266mDNS.h>
 #include <WiFiManager.h>
 #include <ArduinoJson.h>
 #define USE_ARDUINO_INTERRUPTS false // Don't use interrupts for PulseSensor
@@ -17,8 +19,10 @@ SoftwareSerial SerialAT(D5, D6); // RX, TX
  
 #include <TinyGsmClient.h>
 #include <PubSubClient.h>
+#include <ArduinoOTA.h>
+#include <RemoteDebug.h> //https://github.com/JoaoLopesF/RemoteDebug
 
-
+RemoteDebug Debug;
 
 boolean mqttConnect();
 void mqttCallback(char* topic, uint8_t* payload, unsigned int len);
@@ -29,6 +33,9 @@ boolean saveConfig();
 void saveConfigCallback();
 void changeMux(int A);
 boolean sendMessage(float bpm, float tmp);
+void setup_mDNS();
+void setup_remoteDebug();
+void setup_arduinoOTA();
 
 // See all AT commands, if wanted
 // #define DUMP_AT_COMMANDS
@@ -77,6 +84,8 @@ const char* topicInit = "GsmClientTest/init";
 const char* topicLedStatus = "GsmClientTest/ledStatus";
 
 // Config parameters
+// Minutes
+int hibernationLength = 1;
 char petName[40] = "Doggo";
 char email[40] = "email@example.com";
 
@@ -93,7 +102,6 @@ TinyGsmClient gsmClient(modem);
 WiFiClient wifiClient;
 PubSubClient mqtt;
 PulseSensorPlayground pulseSensor;
-
 
 long lastReconnectAttempt = 0;
 
@@ -113,23 +121,37 @@ void setup() {
   }
 
   boolean loadSuccessful = loadConfig();
-
   if (wifiConnect(!loadSuccessful)) {
     mqtt.setClient(wifiClient);
+    
   } else {
     if (gsmConnect()) {
       mqtt.setClient(gsmClient);
     }
   }
   
+  SerialMon.print("IP address: ");
+  SerialMon.println(WiFi.localIP());
   // MQTT Broker setup
   mqtt.setServer(broker, 1883);
   mqtt.setCallback(mqttCallback);
 }
 
-
+enum messageState {
+  NOT_SENT,
+  SENT,
+  RECEIVED
+};
+enum messageState currState = NOT_SENT;
 void loop() {
-  
+  if (currState == RECEIVED && hibernationLength) {
+    SerialMon.print("Going to sleep for ");
+    SerialMon.print(hibernationLength);
+    SerialMon.println(" minutes");
+    ESP.deepSleep(hibernationLength * 1000000 * 60);
+  }
+  else if (WiFi.status() != WL_CONNECTED) wifiConnect(false);
+
   if (!mqtt.connected()) {
     // Reconnect every 10 seconds
     unsigned long t = millis();
@@ -142,24 +164,23 @@ void loop() {
     delay(100);
     return;
   }
-  
+
   changeMux(LOW);
-  // Serial.println(analogRead(ANALOG_INPUT));
   if (pulseSensor.sawNewSample()) {
     /*
-       Every so often, send the latest Sample.
-       We don't print every sample, because our baud rate
-       won't support that much I/O.
+    Every so often, send the latest Sample.
+    We don't print every sample, because our baud rate
+    won't support that much I/O.
     */
     if (--samplesUntilReport == (byte) 0) {
       samplesUntilReport = SAMPLES_PER_SERIAL_SAMPLE;
-      
+
       if (pulseSensor.sawStartOfBeat()) {
         float bpm = pulseSensor.getBeatsPerMinute();
 
-        Serial.println("♥  A HeartBeat Happened ! "); // If test is "true", print a message "a heartbeat happened".
-        Serial.print("BPM: ");                        // Print phrase "BPM: " 
-        Serial.println(bpm);                        // Print the value inside of myBPM. 
+        SerialMon.println("♥  A HeartBeat Happened ! "); // If test is "true", print a message "a heartbeat happened".
+        SerialMon.print("BPM: ");                          // Print the value inside of myBPM.
+        SerialMon.println(bpm);
         changeMux(HIGH);
 
         float tmp = (analogRead(ANALOG_INPUT) * 3.3 / 1024.0 - 0.5) * 100;
@@ -167,6 +188,7 @@ void loop() {
         SerialMon.println(tmp);
 
         sendMessage(bpm, tmp);
+        if (currState == NOT_SENT) currState = SENT;
       }
     }
   }
@@ -181,8 +203,9 @@ void mqttCallback(char* topic, uint8_t* payload, unsigned int len) {
   SerialMon.print("]: ");
   SerialMon.write(payload, len);
   SerialMon.println();
-
-  
+  currState = RECEIVED;
+  SerialMon.print("value of currstate: ");
+  SerialMon.println(currState);
 }
 
 boolean gsmConnect() {
@@ -266,18 +289,25 @@ boolean wifiConnect(boolean forceConfigPortal) {
   WiFiManager wifiManager;
   wifiManager.setSaveConfigCallback(saveConfigCallback);
 
+  WiFiManagerParameter customHibernationLength(
+    "hibernationLength",
+    "Hibernation length",
+    String(hibernationLength).c_str(),
+    5
+  );
   WiFiManagerParameter customPetName("name", "Pet name", petName, 40);
   WiFiManagerParameter customEmail("email", "e-mail", email, 40);
 
+  wifiManager.addParameter(&customHibernationLength);
   wifiManager.addParameter(&customPetName);
   wifiManager.addParameter(&customEmail);
-  
-  
+
+
   boolean connectionSuccessful = false;
   if (forceConfigPortal) {
     SerialMon.println("Starting forced config portal");
     connectionSuccessful = wifiManager.startConfigPortal(AP_NAME);
-  } 
+  }
   else connectionSuccessful = wifiManager.autoConnect(AP_NAME);
 
   if(!connectionSuccessful) {
@@ -286,9 +316,14 @@ boolean wifiConnect(boolean forceConfigPortal) {
   }
   SerialMon.println(" success");
 
+  SerialMon.print("raw hibernation value: ");
+  SerialMon.println(customHibernationLength.getValue());
+  hibernationLength = String(customHibernationLength.getValue()).toInt();
+  SerialMon.println("parsed value: ");
+  SerialMon.println(hibernationLength);
   strcpy(petName, customPetName.getValue());
   strcpy(email, customEmail.getValue());
-  
+
   SerialMon.print("petName: ");
   SerialMon.println(petName);
 
@@ -368,7 +403,7 @@ boolean loadConfig() {
   serializeJsonPretty(jsonDocument, SerialMon);
 
   if (error) {
-    Serial.println("Failed to load json config");
+    SerialMon.println("Failed to load json config");
     configFile.close();
     return false;
   }
@@ -407,4 +442,54 @@ void saveConfigCallback() {
 
 void changeMux(int A) {
   digitalWrite(MUX_A, A);
+}
+
+void setup_mDNS()
+{
+  if (MDNS.begin(HOST_NAME))
+  {
+    SerialMon.print("* MDNS responder started. Hostname -> ");
+    SerialMon.println(HOST_NAME);
+  }
+  MDNS.addService("telnet", "tcp", 23);
+}
+
+void setup_arduinoOTA()
+{
+  ArduinoOTA.onStart([]() {
+    SerialMon.println("OTA: Start");
+  });
+  ArduinoOTA.onEnd([]() {
+    SerialMon.println("\nEnd");
+  });
+  ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
+    SerialMon.printf("Progress: %u%%\r", (progress / (total / 100)));
+  });
+  ArduinoOTA.onError([](ota_error_t error) {
+    SerialMon.printf("Error[%u]: ", error);
+    if (error == OTA_AUTH_ERROR)
+      SerialMon.println("Auth Failed");
+    else if (error == OTA_BEGIN_ERROR)
+      SerialMon.println("Begin Failed");
+    else if (error == OTA_CONNECT_ERROR)
+      SerialMon.println("Connect Failed");
+    else if (error == OTA_RECEIVE_ERROR)
+      SerialMon.println("Receive Failed");
+    else if (error == OTA_END_ERROR)
+      SerialMon.println("End Failed");
+  });
+  SerialMon.println("OTA about to begin");
+  ArduinoOTA.begin();
+}
+
+void setup_remoteDebug()
+{
+    // Initialize RemoteDebug
+
+    Debug.begin(HOST_NAME); // Initialize the WiFi server
+
+    Debug.setResetCmdEnabled(true); // Enable the reset command
+
+    Debug.showProfiler(true); // Profiler (Good to measure times, to optimize codes)
+    Debug.showColors(true);   // Colors
 }
